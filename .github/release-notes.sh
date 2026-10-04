@@ -79,7 +79,10 @@ fi
 heading_line() { grep -n -F -m1 "## [$1]" CHANGELOG.md | cut -d: -f1 || true; }
 start_line=$(heading_line "$VERSION")
 [ -n "$start_line" ] || start_line=$(heading_line Unreleased)
-stop_line=$([ -n "$stop" ] && heading_line "$stop" || true)
+stop_line=""
+if [ -n "$stop" ]; then
+    stop_line=$(heading_line "$stop")
+fi
 if [ -z "$stop_line" ] || [ -z "$start_line" ] || [ "$stop_line" -le "$start_line" ]; then
     stop=""
 fi
