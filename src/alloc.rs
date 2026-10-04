@@ -108,8 +108,7 @@ pub fn allocate(c: &Channel<'_>, p: &Params, table: &[u8; 64]) -> Vec<u8> {
     let bndend = masktab(end - 1) + 1;
     let mut excite = [0i32; 50];
     let (mut fastleak, mut slowleak) = c.leak.unwrap_or((0, 0));
-    let begin;
-    if bndstrt == 0 {
+    let begin = if bndstrt == 0 {
         let lfe_last = |bin: usize| bndend == 7 && bin == 6;
         let mut lowcomp = 0;
         lowcomp = calc_lowcomp(lowcomp, bndpsd[0], bndpsd[1], 0);
@@ -139,10 +138,10 @@ pub fn allocate(c: &Channel<'_>, p: &Params, table: &[u8; 64]) -> Vec<u8> {
             slowleak = slowleak.max(bndpsd[bin] - p.sgain);
             excite[bin] = (fastleak - lowcomp).max(slowleak);
         }
-        begin = 22;
+        22
     } else {
-        begin = bndstrt;
-    }
+        bndstrt
+    };
     for bin in begin..bndend {
         fastleak -= p.fdecay;
         fastleak = fastleak.max(bndpsd[bin] - c.fgain);
