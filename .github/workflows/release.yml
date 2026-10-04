@@ -1,0 +1,162 @@
+name: Release
+
+# Run by hand against a release tag ("Use workflow from", tag), once the version in Cargo.toml
+# is bumped, CHANGELOG.md has its section, both are merged and that commit of main is tagged
+# with `git tag -s VERSION`. It checks the tag, builds every target, composes the notes and
+# leaves a draft release on the tag.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Full history, to check that the tagged commit is on main
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Before anything is built: the run is on a tag named after the version in Cargo.toml,
+      # the tag is annotated and its signature verified by GitHub, the tagged commit is on main,
+      # and no published release has the tag yet
+      - name: Check the release tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [ "${GITHUB_REF_TYPE}" = tag ] ||
+            fail "run the release against its version tag, not ${GITHUB_REF}"
+          TAG=${GITHUB_REF_NAME}
+          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
+          [ "${TAG}" = "${VERSION}" ] ||
+            fail "tag ${TAG} does not match version ${VERSION} in Cargo.toml"
+          REF=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            --jq '"\(.object.type) \(.object.sha)"')
+          read -r TYPE SHA <<< "${REF}"
+          [ "${TYPE}" = tag ] || fail "tag ${TAG} is not annotated; make it with git tag -s"
+          SIG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SHA}" \
+            --jq '"\(.verification.verified) \(.verification.reason)"')
+          read -r VERIFIED REASON <<< "${SIG}"
+          [ "${VERIFIED}" = true ] || fail "tag ${TAG} is not signed with a verified key (${REASON})"
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main ||
+            fail "tag ${TAG} is not on main"
+          if gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            fail "release ${TAG} is already published"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: version
+    # The EMDF keys, when set, live in this environment, which deploys to main and the release
+    # tags alone
+    environment: emdf-key
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One row per archive. Asset names are part of the download contract for tools that
+        # fetch releases, so do not rename a target between releases. Windows has no fat
+        # binary format cargo can produce, so it gets one archive per CPU.
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: Windows
+            cpu: Intel or AMD (almost all PCs)
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: Windows
+            cpu: ARM (Snapdragon, Windows on ARM)
+          - os: macos-latest
+            target: universal-apple-darwin
+            toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            platform: macOS
+            cpu: Intel and Apple Silicon (universal)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: Linux
+            cpu: Intel or AMD
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: Linux
+            cpu: ARM
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.toolchain_targets || matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -y && sudo apt-get install -y musl-tools
+
+      # With EMDF_EMBED_KEY_B64 set in the emdf-key environment, the binaries embed the key set
+      # (embed-key); without it they carry none, and the release notes say so.
+      - name: Build and package
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          CPU: ${{ matrix.cpu }}
+          EMDF_EMBED_KEY_B64: ${{ secrets.EMDF_EMBED_KEY_B64 }}
+        run: .github/package.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: [ version, build ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # Full history, so the previous tag can be found for the notes
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compose the release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          .github/release-notes.sh dist > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          draft: true
+          body_path: release-notes.md
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256

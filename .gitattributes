@@ -1,0 +1,5 @@
+# Test streams are binary; never let a checkout convert their line endings
+*.ac3 binary
+*.ec3 binary
+# The release scripts run under bash on every runner, Windows included
+*.sh text eol=lf

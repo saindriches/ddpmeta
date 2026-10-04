@@ -1,0 +1,25 @@
+[package]
+name = "ddpmeta"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Show and strip DRC and dialogue normalization metadata in DD (AC-3) and DD+ (E-AC-3, including DD+ JOC) elementary streams."
+license = "Apache-2.0"
+
+# Standalone crate with no dependencies.
+[workspace]
+
+[features]
+# Bake the EMDF key set into the binary (no runtime key file). build.rs takes the
+# binary key file from EMDF_EMBED_KEY_B64 (base64, as a CI secret) or EMDF_EMBED_KEY_FILE (a
+# path); off by default, so the default build is config-only and carries no key.
+embed-key = []
+
+[profile.release]
+opt-level = 3
+
+# Release archives (.github/package.sh): thin LTO and stripped symbols.
+[profile.release-deploy]
+inherits = "release"
+lto = "thin"
+strip = "symbols"

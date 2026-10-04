@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes the running check
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Rustfmt, clippy and shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --release --all-targets -- --deny warnings
+
+      - name: Shellcheck
+        run: shellcheck .github/*.sh
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Keep in step with rust-version in Cargo.toml
+      - uses: dtolnay/rust-toolchain@1.87
+
+      - name: Check
+        run: cargo check --locked --all-targets
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Without the EMDF keys the tests that need them skip
+      - name: Test
+        run: cargo test --locked --release
+
+  # The EMDF keys live only in the emdf-key environment, which deploys to main alone. This job
+  # runs only for pushes to main, so code reaches the keys only after it is merged: no pull
+  # request, from a fork or from a branch of this repository, names the environment, and a
+  # workflow on any other branch that does is refused by its branch rule.
+  key:
+    name: Key tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: emdf-key
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The key file goes to the runner's temporary directory, which the runner discards; the
+      # tests never print key material
+      - name: Key file from the secret
+        env:
+          EMDF_EMBED_KEY_B64: ${{ secrets.EMDF_EMBED_KEY_B64 }}
+        run: |
+          if [ -z "${EMDF_EMBED_KEY_B64}" ]; then
+            echo "::error::EMDF_EMBED_KEY_B64 is not set in the emdf-key environment"
+            exit 1
+          fi
+          printf '%s' "${EMDF_EMBED_KEY_B64}" | base64 -d > "${RUNNER_TEMP}/emdf-keys.bin"
+          echo "EMDF_PROTECTION_KEY_FILE=${RUNNER_TEMP}/emdf-keys.bin" >> "${GITHUB_ENV}"
+
+      - name: Clippy with embed-key
+        env:
+          EMDF_EMBED_KEY_B64: ${{ secrets.EMDF_EMBED_KEY_B64 }}
+        run: cargo clippy --locked --release --all-targets --features embed-key -- --deny warnings
+
+      # Fails if any test skipped for want of the keys
+      - name: Test with the keys
+        run: |
+          cargo test --locked --release 2>&1 | tee "${RUNNER_TEMP}/test.log"
+          ! grep -q 'skipping key dependent checks' "${RUNNER_TEMP}/test.log"
