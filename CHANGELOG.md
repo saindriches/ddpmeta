@@ -8,6 +8,9 @@ the release notes from here (`.github/release-notes.sh`).
 
 ## [Unreleased]
 
+### Added
+- `resign` recomputes the EMDF protection bits with the configured key set and fixes every CRC, changing nothing else. It can sign protected data edited elsewhere or replace stale protection; without a key, or with no key for a container's `key_id`, it refuses.
+
 ## [0.1.0] - 2026-10-05
 
 ### Added

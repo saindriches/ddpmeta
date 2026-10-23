@@ -3,7 +3,7 @@ name = "ddpmeta"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.87"
-description = "Show and strip DRC and dialogue normalization metadata in DD (AC-3) and DD+ (E-AC-3, including DD+ JOC) elementary streams."
+description = "Show, strip and re-sign DRC and dialogue normalization metadata in DD (AC-3) and DD+ (E-AC-3, including DD+ JOC) elementary streams."
 license = "Apache-2.0"
 
 # Standalone crate with no dependencies.

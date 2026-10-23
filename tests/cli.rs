@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use ddpmeta::emdf_protection::{KeySet, ProtectionKey};
+
 const BIN: &str = env!("CARGO_BIN_EXE_ddpmeta");
 
 fn data(name: &str) -> PathBuf {
@@ -48,6 +50,7 @@ fn help_and_version_succeed() {
         text(&o.stdout),
         format!("ddpmeta {}\n", env!("CARGO_PKG_VERSION"))
     );
+    assert!(text(&run(&["--help"]).stdout).contains("ddpmeta resign"));
 }
 
 #[test]
@@ -103,6 +106,14 @@ fn usage_errors_exit_2_and_name_the_problem() {
             "OUT is the input file",
         ),
         (&["fields", i, "x"], "FRAME must be a number"),
+        (&["resign"], "resign needs one IN, got 0"),
+        (&["resign", "--line", i], "--line does not apply to resign"),
+        (&["resign", i], "resign needs -o OUT or --in-place"),
+        (
+            &["resign", "-o", "x", "--in-place", i],
+            "cannot be combined",
+        ),
+        (&["resign", "--in-place", "-"], "--in-place needs a file"),
     ];
     for (args, want) in cases {
         let o = run(args);
@@ -221,4 +232,90 @@ fn pipes() {
         text(&shown.stdout),
         text(&run(&["show", input.to_str().unwrap()]).stdout)
     );
+}
+
+fn synthetic_key_file(dir: &Path) -> PathBuf {
+    let mut k = KeySet::new();
+    k.insert(0, ProtectionKey::new(vec![0x11; 32]).unwrap());
+    k.insert(1, ProtectionKey::new(vec![0x22; 32]).unwrap());
+    let p = dir.join("keys.bin");
+    std::fs::write(&p, k.to_binary().unwrap()).unwrap();
+    p
+}
+
+/// resign needs a configured key: without one it refuses before writing anything.
+#[test]
+fn resign_needs_a_key() {
+    let d = scratch("resign_no_key");
+    let out = d.join("out.ec3");
+    let o = run(&[
+        "resign",
+        "-o",
+        out.to_str().unwrap(),
+        data("ddp51.ec3").to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o.stderr).contains("resign needs a key"),
+        "{}",
+        text(&o.stderr)
+    );
+    assert!(!out.exists());
+}
+
+/// resign writes protection that verifies, a second pass changes nothing, and --in-place
+/// gives the same bytes as -o.
+#[test]
+fn resign_writes_valid_protection() {
+    let d = scratch("resign");
+    let keys = synthetic_key_file(&d);
+    let key = keys.to_str().unwrap();
+    let input = data("ddp51.ec3");
+    let out = d.join("out.ec3");
+    let o = run(&[
+        "resign",
+        "--emdf-key-file",
+        key,
+        "-o",
+        out.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stdout).contains("63 EMDF containers re-signed"),
+        "{}",
+        text(&o.stdout)
+    );
+
+    let shown = run(&["show", "--emdf-key-file", key, out.to_str().unwrap()]);
+    assert!(
+        text(&shown.stdout).contains("primary valid, secondary valid"),
+        "{}",
+        text(&shown.stdout)
+    );
+
+    let again = d.join("again.ec3");
+    let o = run(&[
+        "resign",
+        "--emdf-key-file",
+        key,
+        "-o",
+        again.to_str().unwrap(),
+        out.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("0 changed"));
+    assert_eq!(std::fs::read(&again).unwrap(), std::fs::read(&out).unwrap());
+
+    let edit = d.join("edit.ec3");
+    std::fs::copy(&input, &edit).unwrap();
+    let o = run(&[
+        "resign",
+        "--emdf-key-file",
+        key,
+        "--in-place",
+        edit.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(std::fs::read(&edit).unwrap(), std::fs::read(&out).unwrap());
 }

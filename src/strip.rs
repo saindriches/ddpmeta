@@ -346,22 +346,18 @@ pub fn strip_stream(r: impl Read, w: &mut impl Write, opt: &Options) -> Result<R
     Ok(s.finish())
 }
 
-/// Strip a file in place, with method A only: method B rewrites most of every frame, so it
-/// saves nothing over writing a new file. One pass edits every syncframe and records only the
-/// bytes that change (a few percent of a stream at most); they are written once every frame has
-/// succeeded, so a refused stream is left untouched. An I/O error or an interruption while
-/// writing leaves the file partly edited.
-pub fn strip_in_place(path: &Path, opt: &Options) -> Result<Report> {
-    if opt.method != Method::InPlace {
-        return Err(Error::NotSupportedYet(
-            "editing a file in place with method B; it rewrites most of every frame".into(),
-        ));
-    }
-    let mut s = Stripper::new(opt);
+/// Edit a file in place with `frame`, one syncframe at a time: record only the bytes that change
+/// (a few percent of a stream at most) and write them once every frame has succeeded, so a
+/// refused stream is left untouched. An I/O error or an interruption while writing leaves the
+/// file partly edited.
+pub(crate) fn edit_in_place(
+    path: &Path,
+    mut frame: impl FnMut(usize, u64, &[u8]) -> Result<Option<Vec<u8>>>,
+) -> Result<()> {
     let mut changes = Changes::default();
     let mut frames = FrameReader::new(BufReader::new(File::open(path).map_err(io)?));
     while let Some(f) = frames.next_frame()? {
-        if let Some(nd) = s.frame(f.index, f.at, f.data)? {
+        if let Some(nd) = frame(f.index, f.at, f.data)? {
             changes.record(f.at, f.data, &nd);
         }
     }
@@ -374,6 +370,19 @@ pub fn strip_in_place(path: &Path, opt: &Options) -> Result<Report> {
         changes.apply(&mut file).map_err(io)?;
         file.sync_all().map_err(io)?;
     }
+    Ok(())
+}
+
+/// Strip a file in place, with method A only: method B rewrites most of every frame, so it
+/// saves nothing over writing a new file.
+pub fn strip_in_place(path: &Path, opt: &Options) -> Result<Report> {
+    if opt.method != Method::InPlace {
+        return Err(Error::NotSupportedYet(
+            "editing a file in place with method B; it rewrites most of every frame".into(),
+        ));
+    }
+    let mut s = Stripper::new(opt);
+    edit_in_place(path, |n, at, d| s.frame(n, at, d))?;
     Ok(s.finish())
 }
 

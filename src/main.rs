@@ -1,4 +1,4 @@
-//! ddpmeta command line: `show`, `strip` and the `fields` diagnostic.
+//! ddpmeta command line: `show`, `strip`, `resign` and the `fields` diagnostic.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, IsTerminal, Read, Write};
@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use ddpmeta::edit::{Method, Strip};
 use ddpmeta::emdf_protection::{load_keys, KeySet};
 use ddpmeta::error::Error;
+use ddpmeta::resign::{resign_in_place, resign_stream};
 use ddpmeta::show::show_to;
 use ddpmeta::stream::{parse_frame, FrameReader};
 use ddpmeta::strip::{strip_in_place, strip_stream, Options, Report};
@@ -17,16 +18,18 @@ const IO_BUFFER: usize = 1 << 16;
 fn help() -> String {
     let mut h = format!(
         "ddpmeta {}
-Show and strip DRC and dialnorm metadata in DD (AC-3) and DD+ (E-AC-3) streams.
+Show, strip and re-sign DRC and dialnorm metadata in DD (AC-3) and DD+ (E-AC-3) streams.
 
 Usage:
   ddpmeta show [options] IN
   ddpmeta strip [options] (-o OUT | --in-place) IN
+  ddpmeta resign [options] (-o OUT | --in-place) IN
   ddpmeta fields IN FRAME
 
 Commands:
   show    print a summary per substream: dialnorm, DRC statistics, EMDF
   strip   remove DRC or set dialnorm, keeping EMDF protection valid
+  resign  recompute EMDF protection from the configured key set
   fields  print every parsed element of syncframe FRAME (counting from 0)
 
 IN can be - for standard input, and OUT - for standard output.
@@ -42,13 +45,17 @@ Strip options (at least one of --line, --rf, --dialnorm):
   -o OUT                    write to OUT, only if every syncframe succeeds
   --in-place                edit IN itself (method a only), only if every syncframe succeeds
   --allow-stale-protection  write EMDF containers whose protection no longer verifies
+
+Resign options:
+  -o OUT                    write to OUT, only if every syncframe succeeds
+  --in-place                edit IN itself, only if every syncframe succeeds
 ",
         env!("CARGO_PKG_VERSION")
     );
     if !cfg!(feature = "embed-key") {
         h.push_str(
             "
-Key options (show and strip):
+Key options (show, strip and resign):
   --emdf-key-file PATH      read the EMDF keys from PATH, not from EMDF_PROTECTION_KEY_FILE;
                             the binary key set, or one key in hex used as key_id 0
 ",
@@ -68,13 +75,13 @@ General options:
 const OPTIONS: &[(&str, bool, &[&str])] = &[
     ("-v", false, &["show"]),
     ("--verbose", false, &["show"]),
-    ("--emdf-key-file", true, &["show", "strip"]),
+    ("--emdf-key-file", true, &["show", "strip", "resign"]),
     ("--line", false, &["strip"]),
     ("--rf", false, &["strip"]),
     ("--dialnorm", false, &["strip"]),
     ("--method", true, &["strip"]),
-    ("-o", true, &["strip"]),
-    ("--in-place", false, &["strip"]),
+    ("-o", true, &["strip", "resign"]),
+    ("--in-place", false, &["strip", "resign"]),
     ("--allow-stale-protection", false, &["strip"]),
 ];
 
@@ -293,10 +300,10 @@ enum Target {
     InPlace(PathBuf),
 }
 
-fn target(c: &Cli, input: &str) -> Result<Target, String> {
+fn target(c: &Cli, input: &str, cmd: &str) -> Result<Target, String> {
     match (&c.out, c.in_place) {
         (Some(_), true) => Err("-o and --in-place cannot be combined".into()),
-        (None, false) => Err("strip needs -o OUT or --in-place".into()),
+        (None, false) => Err(format!("{cmd} needs -o OUT or --in-place")),
         (None, true) if input == "-" => Err("--in-place needs a file, not standard input".into()),
         (None, true) if c.method == Some(Method::Repack) => Err(
             "--in-place needs method a: method b rewrites most of every frame, so use -o".into(),
@@ -322,8 +329,12 @@ fn target(c: &Cli, input: &str) -> Result<Target, String> {
     }
 }
 
-/// Write the stripped stream to a temporary file beside `out`, then move it over `out`.
-fn strip_to_file(r: impl Read, out: &Path, opt: &Options) -> Result<Report, Error> {
+/// Write the stream `run` produces to a temporary file beside `out`, then move it over `out`.
+fn write_file<T>(
+    r: impl Read,
+    out: &Path,
+    run: impl FnOnce(&mut dyn Read, &mut BufWriter<File>) -> Result<T, Error>,
+) -> Result<T, Error> {
     let dir = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -339,16 +350,22 @@ fn strip_to_file(r: impl Read, out: &Path, opt: &Options) -> Result<Report, Erro
         .open(&tmp)
         .map_err(io)?;
     let mut w = BufWriter::with_capacity(IO_BUFFER, f);
-    let done = strip_stream(r, &mut w, opt).and_then(|rep| {
+    let mut r = r;
+    let done = run(&mut r, &mut w).and_then(|value| {
         let f = w.into_inner().map_err(|e| io(e.into_error()))?;
         f.sync_all().map_err(io)?;
         std::fs::rename(&tmp, out).map_err(io)?;
-        Ok(rep)
+        Ok(value)
     });
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     done
+}
+
+/// Write the stripped stream to a temporary file beside `out`, then move it over `out`.
+fn strip_to_file(r: impl Read, out: &Path, opt: &Options) -> Result<Report, Error> {
+    write_file(r, out, |r, w| strip_stream(r, w, opt))
 }
 
 fn strip(c: &Cli) -> Result<(), Fail> {
@@ -363,7 +380,7 @@ fn strip(c: &Cli) -> Result<(), Fail> {
             "strip needs at least one of --line, --rf, --dialnorm".into(),
         ));
     }
-    let target = target(c, input).map_err(Fail::Usage)?;
+    let target = target(c, input, "strip").map_err(Fail::Usage)?;
     let opt = Options {
         strip: c.strip,
         method: c.method.unwrap_or(Method::InPlace),
@@ -403,6 +420,48 @@ fn strip(c: &Cli) -> Result<(), Fail> {
     Ok(())
 }
 
+fn resign(c: &Cli) -> Result<(), Fail> {
+    let [input] = c.pos.as_slice() else {
+        return Err(Fail::Usage(format!(
+            "resign needs one IN, got {}",
+            c.pos.len()
+        )));
+    };
+    let target = target(c, input, "resign").map_err(Fail::Usage)?;
+    let Some(key) = keys(c)? else {
+        return Err(Fail::Run(Error::Protected(
+            "resign needs a key (--emdf-key-file or EMDF_PROTECTION_KEY_FILE)".into(),
+        )));
+    };
+    let rep = match &target {
+        Target::InPlace(p) => resign_in_place(p, &key)?,
+        Target::File(p) => write_file(open_input(input)?, p, |r, w| resign_stream(r, w, &key))?,
+        Target::Special(p) => {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(p)
+                .map_err(|e| Error::Io(format!("{}: {e}", p.display())))?;
+            resign_stream(open_input(input)?, &mut BufWriter::new(f), &key)?
+        }
+        Target::Stdout => resign_stream(
+            open_input(input)?,
+            &mut BufWriter::with_capacity(IO_BUFFER, io::stdout().lock()),
+            &key,
+        )?,
+    };
+    let text = format!(
+        "{} frames, {} changed: {} EMDF containers re-signed\n",
+        rep.frames, rep.frames_changed, rep.containers_resigned
+    );
+    // With the stream on standard output, the report goes to standard error.
+    if matches!(target, Target::Stdout) {
+        eprint!("{text}");
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
 fn usage_error(msg: &str) -> ExitCode {
     eprintln!("ddpmeta: {msg}\nRun 'ddpmeta --help' for usage.");
     ExitCode::from(2)
@@ -432,7 +491,7 @@ fn main() -> ExitCode {
         print!("{}", help());
         return ExitCode::SUCCESS;
     }
-    if !["show", "strip", "fields"].contains(&cmd.as_str()) {
+    if !["show", "strip", "resign", "fields"].contains(&cmd.as_str()) {
         return usage_error(&format!("unknown command {cmd}"));
     }
     let c = match parse(cmd, &args[1..]) {
@@ -442,6 +501,7 @@ fn main() -> ExitCode {
     let done = match cmd.as_str() {
         "show" => show(&c),
         "strip" => strip(&c),
+        "resign" => resign(&c),
         _ => fields(&c),
     };
     match done {

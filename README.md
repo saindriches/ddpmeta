@@ -1,8 +1,8 @@
 # ddpmeta
 
-Shows and strips DRC and dialogue normalization metadata in DD (AC-3) and DD+ (E-AC-3)
-streams, without re-encoding. DD+ JOC and the Blu-ray profile (an AC-3 core with an E-AC-3
-dependent substream) are included. Parsing follows ETSI TS 102 366 V1.4.1.
+Shows, strips and re-signs DRC and dialogue normalization metadata in DD (AC-3) and DD+
+(E-AC-3) streams, without re-encoding. DD+ JOC and the Blu-ray profile (an AC-3 core with an
+E-AC-3 dependent substream) are included. Parsing follows ETSI TS 102 366 V1.4.1.
 
 ddpmeta is an independent tool, not affiliated with or endorsed by Dolby Laboratories. Dolby,
 Dolby Digital and Dolby Digital Plus are trademarks of Dolby Laboratories.
@@ -12,6 +12,7 @@ Dolby Digital and Dolby Digital Plus are trademarks of Dolby Laboratories.
 ```
 ddpmeta show [options] IN
 ddpmeta strip [options] (-o OUT | --in-place) IN
+ddpmeta resign [options] (-o OUT | --in-place) IN
 ddpmeta fields IN FRAME
 ```
 
@@ -55,6 +56,13 @@ failure leaves the frames written before it.
 strip refuses anything it cannot validate, including an edit that would leave EMDF protection
 invalid. `--allow-stale-protection` writes such containers anyway, but some players then stop
 decoding.
+
+### resign
+
+Recomputes the EMDF protection of every protected container with the configured key set and
+fixes every CRC. Nothing else changes, and a stream that already verifies comes out byte for
+byte the same. Use it to sign protected data that was edited elsewhere, or to replace stale
+protection. A key is required; a container with no configured `key_id` is refused.
 
 ### fields
 
